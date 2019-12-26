@@ -10,7 +10,7 @@ import java.util.Objects;
 public abstract class Message {
 
     public static enum MessageType {
-        AppendEntities, AppendEntitiesResult, RequestVote, RequestVoteResult, ClientCommand
+        AppendEntities, AppendEntitiesResult, RequestVote, RequestVoteResult, ClientCommand, ClientCommandResult
     }
 
     private final NodeIdentity from;
@@ -40,6 +40,10 @@ public abstract class Message {
         return type;
     }
 
+    public void reply(Message replyMessage) {
+
+    }
+
     private static abstract class Result extends Message {
 
         private final long term;
@@ -66,21 +70,33 @@ public abstract class Message {
         }
     }
 
-    public static class ClientCommand extends Message {
+    private static class ClientMessage extends Message {
 
-        private final String command;
+        private final String message;
+
+        private ClientMessage(
+                NodeIdentity from, 
+                NodeIdentity to, 
+                MessageType type,
+                String message) {
+
+            super(from, to, type);
+            this.message = message;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+    }
+
+    public static class ClientCommand extends ClientMessage {
 
         public ClientCommand(
                 NodeIdentity from, 
                 NodeIdentity to, 
                 String command) {
 
-            super(from, to, MessageType.ClientCommand);
-            this.command = command;
-        }
-
-        public String getCommand() {
-            return command;
+            super(from, to, MessageType.ClientCommand, command);
         }
 
         @Override
@@ -89,7 +105,28 @@ public abstract class Message {
                 "from=" + getFrom() +
                 ", to=" + getTo() +
                 ", type=" + getMessageType() +
-                ", command=" + getCommand() +
+                ", message=" + getMessage() +
+                '}';
+        }
+    }
+
+    public static class ClientCommandResult extends ClientMessage {
+
+        public ClientCommandResult(
+                NodeIdentity from, 
+                NodeIdentity to, 
+                String message) {
+
+            super(from, to, MessageType.ClientCommandResult, message);
+        }
+
+        @Override
+        public String toString() {
+            return "ClientCommandResult{" +
+                "from=" + getFrom() +
+                ", to=" + getTo() +
+                ", type=" + getMessageType() +
+                ", message=" + getMessage() +
                 '}';
         }
     }

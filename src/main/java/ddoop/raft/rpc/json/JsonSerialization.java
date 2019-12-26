@@ -17,6 +17,7 @@ import ddoop.raft.rpc.Message;
 import ddoop.raft.rpc.Serialization;
 import ddoop.raft.rpc.Message.AppendEntities;
 import ddoop.raft.rpc.Message.AppendEntitiesResult;
+import ddoop.raft.rpc.Message.ClientCommand;
 import ddoop.raft.rpc.Message.MessageType;
 import ddoop.raft.rpc.Message.RequestVote;
 import ddoop.raft.rpc.Message.RequestVoteResult;
@@ -80,6 +81,9 @@ public class JsonSerialization implements Serialization {
                     }
                     case RequestVoteResult:  {
                         return gson.fromJson(jsonReader, RequestVoteResult.class);
+                    }
+                    case ClientCommand: {
+                        return gson.fromJson(jsonReader, ClientCommand.class);
                     }
                     default: {
                         logger.error("Unknown message type: {}", messageType);

@@ -241,4 +241,11 @@ public class UdpRpc implements Rpc {
             return null;
         }
     }
+
+    @Override
+    public void reply(Message original, Message reply) throws InterruptedException {
+        // replying to a udp message is just sending it
+        // because there is no connection
+        this.send(reply);
+    }
 }

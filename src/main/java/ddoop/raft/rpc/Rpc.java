@@ -27,5 +27,5 @@ public interface Rpc {
      * 
      * @throws InterruptedException If interrupted.
      */
-    // public void reply(Message original, Message reply) throws InterruptedException;
+    public void reply(Message original, Message reply) throws InterruptedException;
 }
