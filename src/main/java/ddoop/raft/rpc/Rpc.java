@@ -18,14 +18,4 @@ public interface Rpc {
      * @throws InterruptedException If interrupted.
      */
     public Message next() throws InterruptedException;
-
-    /**
-     * Replies to the original message.
-     * 
-     * @param original The original message.
-     * @param reply The response message.
-     * 
-     * @throws InterruptedException If interrupted.
-     */
-    // public void reply(Message original, Message reply) throws InterruptedException;
 }

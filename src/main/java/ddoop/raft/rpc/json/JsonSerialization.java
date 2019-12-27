@@ -81,6 +81,9 @@ public class JsonSerialization implements Serialization {
                     case RequestVoteResult:  {
                         return gson.fromJson(jsonReader, RequestVoteResult.class);
                     }
+                    case ClientCommand: {
+                        return gson.fromJson(jsonReader, Message.ClientCommand.class);
+                    }
                     default: {
                         logger.error("Unknown message type: {}", messageType);
                         return null;

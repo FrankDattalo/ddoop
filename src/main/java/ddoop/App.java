@@ -1,12 +1,5 @@
 package ddoop;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.stream.Collectors; 
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import ddoop.raft.node.Node;
 import ddoop.raft.rpc.NodeIdentity;
 import ddoop.raft.rpc.json.JsonSerialization;
@@ -15,73 +8,76 @@ import ddoop.raft.state.inmemory.CommandLoggingStateMachine;
 import ddoop.raft.state.inmemory.InMemoryStateManager;
 import ddoop.util.ThreadPool;
 import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
 
 public class App {
 
     private static final Logger logger = LoggerFactory.getLogger(App.class);
 
+    private static String getEnvOrDefault(String key, String defaultValue) {
+        String val = System.getenv(key);
+
+        return val != null ? val : defaultValue;
+    }
+
     public static void main(String[] args) throws InterruptedException {
 
-        int timeout = Integer.parseInt(args[0]);
-        int port = Integer.parseInt(args[1]);
-        int httpPort = Integer.parseInt(args[2]);
-        NodeIdentity id = NodeIdentity.parse(args[3]);
-        List<NodeIdentity> nodes = Arrays.asList(args[4].split(",")).stream().map(NodeIdentity::parse)
-                .collect(Collectors.toList());
+        int timeout = Integer.parseInt(getEnvOrDefault("TIMEOUT", "250"));
+
+        int port = Integer.parseInt(getEnvOrDefault("PORT", "8000"));
+
+        int httpPort = Integer.parseInt(getEnvOrDefault("API_PORT", "9000"));
+
+        int packetSize = Integer.parseInt(getEnvOrDefault("PACKET_SIZE", "4048"));
+
+        NodeIdentity id = NodeIdentity.parse(System.getenv("SELF_ID"));
+
+        List<NodeIdentity> nodes =
+                Arrays.stream(System.getenv("NODES")
+                        .split(","))
+                        .map(NodeIdentity::parse)
+                        .collect(Collectors.toList());
  
-        logger.debug("timeout: {}", timeout);
-        logger.debug("udp port: {}", port);
-        logger.debug("http port: {}", httpPort);
-        logger.debug("node identity: {}", id);
-        logger.debug("nodes: {}", nodes);
+        logger.trace("timeout: {}", timeout);
+        logger.trace("udp port: {}", port);
+        logger.trace("http port: {}", httpPort);;
+        logger.trace("node identity: {}", id);
+        logger.trace("nodes: {}", nodes);
 
         ThreadPool threadPool = new ThreadPool();
 
-        UdpRpc rpc = new UdpRpc(new JsonSerialization(), threadPool, port, 4048);
+        UdpRpc rpc = new UdpRpc(new JsonSerialization(), threadPool, port, packetSize);
         
         Node node = new Node(id, new InMemoryStateManager(), new CommandLoggingStateMachine(), nodes, rpc, threadPool, timeout);
 
         threadPool.onDaemonThread(() -> {
-            try {
-                rpc.start();
-                node.start();
-
-            } finally {
-                rpc.stop();
-            }
+            logger.trace("Starting rpc...");
+            rpc.start();
+            node.start();
         });
 
-        HttpServer httpServer = Vertx.factory.vertx().createHttpServer();
+        Vertx vertx = Vertx.vertx();
 
-        httpServer.requestHandler(request -> {
+        vertx.createHttpServer().requestHandler(httpServerRequest -> {
+           httpServerRequest.bodyHandler(body -> {
+                httpServerRequest.response().end();
 
-            String uri = request.path();
-            String method = request.method().name();
-            String value = request.getParam("value");
+                String bodyAsString = new String(body.getBytes(), StandardCharsets.UTF_8);
+                String uri = httpServerRequest.uri();
 
-            try {
-                String command = String.format("%s %s = %s", method, uri, value); 
+                try {
+                    node.send(String.format("%s %s = %s", httpServerRequest.method(), uri, bodyAsString));
 
-                logger.debug("Sending command: {}", command);
-
-                node.send(command);
-
-            } catch (InterruptedException e) {
-                // TODO Auto-generated catch block
-                e.printStackTrace();
-
-                request.response().setStatusCode(500);
-                request.response().end("error");
-                return;
-            }
-
-            request.response().setStatusCode(200);
-            request.response().end("ok");
-        });
-
-        httpServer.listen(httpPort);
-
-        
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+           });
+        }).listen(httpPort);
     }
 }

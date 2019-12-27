@@ -38,8 +38,6 @@ public class UdpRpc implements Rpc {
     private final int port;
     private final int packetSize;
 
-    private Task senderThread;
-    private Task receiverThread;
     private boolean started = false;
 
     /**
@@ -75,41 +73,13 @@ public class UdpRpc implements Rpc {
 
         logger.trace("Starting...");
 
-        this.senderThread = this.threadPool.onDaemonThread(this::sender);
+        this.threadPool.onDaemonThread(this::sender);
 
-        this.receiverThread = this.threadPool.onDaemonThread(this::receiver);
+        this.threadPool.onDaemonThread(this::receiver);
 
         this.started = true;
 
         logger.trace("Started");
-    }
-
-    /**
-     * Stops the background network threads if they are not already stopped.
-     */
-    public synchronized void stop() {
-        logger.trace("stop()");
-
-        if (!this.started) {
-            logger.trace("Not stopping because bridge is already stopped");
-            return;
-        }
-
-        logger.trace("Stopping...");
-
-        if (this.senderThread != null) {
-            logger.trace("Canceling sender thread");
-            this.senderThread.cancel();
-        }
-
-        if (this.receiverThread != null) {
-            logger.trace("Canceling receiver thread");
-            this.receiverThread.cancel();
-        }
-
-        this.started = false;
-
-        logger.trace("Stopped.");
     }
 
     @Override
@@ -237,7 +207,6 @@ public class UdpRpc implements Rpc {
 
         } catch (SocketException se) {
             logger.error("Unable to bind to port, stopping", se);
-            this.stop();
             return null;
         }
     }

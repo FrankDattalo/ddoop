@@ -59,6 +59,7 @@ public class Node {
     private long commitIndex;
     private long lastApplied;
     private Map<NodeIdentity, LogState> logState = new HashMap<NodeIdentity, LogState>();
+    private NodeIdentity leaderId;
 
     /**
      * Constructs a raft node.
@@ -90,7 +91,7 @@ public class Node {
     }
 
     public void send(String command) throws InterruptedException {
-        logger.debug("send({})", command);
+        logger.trace("send({})", command);
 
         this.clientCommandChannel.put(command);
     }
@@ -131,6 +132,11 @@ public class Node {
                 case RequestVoteResult: {
                     logger.trace("Handing request vote result message");
                     onRequestVoteResult((RequestVoteResult) m);
+                    break;
+                }
+                case ClientCommand: {
+                    logger.trace("Handling client command message");
+                    onClientCommand(((Message.ClientCommand) m).getCommand());
                     break;
                 }
                 default:
@@ -435,6 +441,8 @@ public class Node {
         public void onAppendEntities(AppendEntities m) throws InterruptedException {
             Node.this.restartElectionThread();
 
+            Node.this.leaderId = m.getLeaderId();
+
             // handles the case when our term is greater than the message's term
 
             if (m.getTerm() < Node.this.persisted.getCurrentTerm()) {
@@ -532,7 +540,14 @@ public class Node {
 
         @Override
         public void onClientCommand(String command) throws InterruptedException {
-            logger.trace("ignoring client command as follower");
+            logger.trace("forwarding client command as follower");
+
+            if (Node.this.leaderId != null) {
+                Node.this.rpc.send(new Message.ClientCommand(Node.this.selfId, Node.this.leaderId, command));
+
+            } else {
+                logger.error("Could not forward command, current leader is not known");
+            }
         }
     }
 
@@ -553,6 +568,8 @@ public class Node {
             }
 
             Node.this.restartHeartbeatThread();
+
+            Node.this.leaderId = Node.this.selfId;
         }
 
         @Override
@@ -649,6 +666,8 @@ public class Node {
 
         @Override
         public void onEnterState() throws InterruptedException {
+            Node.this.leaderId = null;
+
             voted.clear();
             voted.add(Node.this.selfId);
             votes = 1;
