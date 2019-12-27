@@ -1,16 +1,20 @@
 package ddoop.raft.rpc;
 
+import ddoop.raft.rpc.message.base.BindableAppendEntitiesMessage;
+import ddoop.raft.rpc.message.base.BindableClientCommandMessage;
+import ddoop.raft.rpc.message.base.BindableRequestVoteMessage;
+import ddoop.raft.rpc.message.base.Message;
+
 /**
  * Remote Procedure Call interface for Raft.
  */
 public interface Rpc {
 
-    /**
-     * Blocks until the message can be sent, then sends the message.
-     * @param message The message to send.
-     * @throws InterruptedException If interrupted.
-     */
-    public void send(Message message) throws InterruptedException;
+    public void send(NodeIdentity.Location location, BindableAppendEntitiesMessage m) throws InterruptedException;
+
+    public void send(NodeIdentity.Location location, BindableClientCommandMessage m) throws InterruptedException;
+
+    public void send(NodeIdentity.Location location, BindableRequestVoteMessage m) throws InterruptedException;
 
     /**
      * Blocks until the next message is recieved.
@@ -19,13 +23,4 @@ public interface Rpc {
      */
     public Message next() throws InterruptedException;
 
-    /**
-     * Replies to the original message.
-     * 
-     * @param original The original message.
-     * @param reply The response message.
-     * 
-     * @throws InterruptedException If interrupted.
-     */
-    public void reply(Message original, Message reply) throws InterruptedException;
 }

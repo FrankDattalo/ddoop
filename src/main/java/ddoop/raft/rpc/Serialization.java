@@ -1,5 +1,7 @@
 package ddoop.raft.rpc;
 
+import ddoop.raft.rpc.message.base.Message;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 

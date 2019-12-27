@@ -10,17 +10,20 @@ import com.google.gson.Gson;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 
+import ddoop.raft.rpc.message.AppendEntitiesResultMessage;
+import ddoop.raft.rpc.message.ClientCommandMessage;
+import ddoop.raft.rpc.message.MessageType;
+import ddoop.raft.rpc.message.RequestVoteResultMessage;
+import ddoop.raft.rpc.message.base.BindableAppendEntitiesMessage;
+import ddoop.raft.rpc.message.base.BindableClientCommandMessage;
+import ddoop.raft.rpc.message.base.BindableRequestVoteMessage;
+import ddoop.raft.rpc.message.base.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import ddoop.raft.rpc.Message;
+
 import ddoop.raft.rpc.Serialization;
-import ddoop.raft.rpc.Message.AppendEntities;
-import ddoop.raft.rpc.Message.AppendEntitiesResult;
-import ddoop.raft.rpc.Message.ClientCommand;
-import ddoop.raft.rpc.Message.MessageType;
-import ddoop.raft.rpc.Message.RequestVote;
-import ddoop.raft.rpc.Message.RequestVoteResult;
+
 
 /**
  * Implementation of the serialization interface using json.
@@ -38,7 +41,7 @@ public class JsonSerialization implements Serialization {
         try {
             logger.trace("serialize(message: {})", message);
 
-            byte type = (byte) message.getMessageType().ordinal();
+            byte type = (byte) message.getType().ordinal();
             outputStream.write(type);
 
             Gson gson = new Gson();
@@ -71,19 +74,22 @@ public class JsonSerialization implements Serialization {
 
                 switch (messageType) {
                     case AppendEntities: {
-                        return gson.fromJson(jsonReader, AppendEntities.class);
+                        return gson.fromJson(jsonReader, BindableAppendEntitiesMessage.class);
                     }
                     case AppendEntitiesResult: {
-                        return gson.fromJson(jsonReader, AppendEntitiesResult.class);
+                        return gson.fromJson(jsonReader, AppendEntitiesResultMessage.class);
                     }
                     case RequestVote: {
-                        return gson.fromJson(jsonReader, RequestVote.class);
+                        return gson.fromJson(jsonReader, BindableRequestVoteMessage.class);
                     }
                     case RequestVoteResult:  {
-                        return gson.fromJson(jsonReader, RequestVoteResult.class);
+                        return gson.fromJson(jsonReader, RequestVoteResultMessage.class);
                     }
                     case ClientCommand: {
-                        return gson.fromJson(jsonReader, ClientCommand.class);
+                        return gson.fromJson(jsonReader, BindableClientCommandMessage.class);
+                    }
+                    case ClientCommandResult: {
+                        return gson.fromJson(jsonReader, ClientCommandMessage.class);
                     }
                     default: {
                         logger.error("Unknown message type: {}", messageType);

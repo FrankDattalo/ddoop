@@ -12,17 +12,17 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedTransferQueue;
 import java.util.stream.Collectors;
 
+import ddoop.raft.rpc.message.*;
+import ddoop.raft.rpc.message.base.BindableAppendEntitiesMessage;
+import ddoop.raft.rpc.message.base.BindableRequestVoteMessage;
+import ddoop.raft.rpc.message.base.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import ddoop.raft.rpc.Message;
+
 import ddoop.raft.rpc.NodeIdentity;
 import ddoop.raft.rpc.Rpc;
-import ddoop.raft.rpc.Message.AppendEntities;
-import ddoop.raft.rpc.Message.AppendEntitiesResult;
-import ddoop.raft.rpc.Message.MessageType;
-import ddoop.raft.rpc.Message.RequestVote;
-import ddoop.raft.rpc.Message.RequestVoteResult;
+
 import ddoop.raft.state.StateMachineApplier;
 import ddoop.raft.state.StateManager;
 import ddoop.raft.state.StateManager.LogEntry;
@@ -36,7 +36,9 @@ public class Node {
 
     private static final Logger logger = LoggerFactory.getLogger(Node.class);
 
-    private final Rpc rpc;
+    private final Rpc internalRpc;
+    private final Rpc clientRpc;
+
     private final StateManager persisted;
     private final StateMachineApplier stateMachineApplier;
     private final ThreadPool threadPool;
@@ -51,14 +53,14 @@ public class Node {
     private State LEADER = new Leader();
     private State CANDIDATE = new Candidate();
 
-    private final BlockingQueue<String> clientCommandChannel = new LinkedTransferQueue<String>();
+    private final BlockingQueue<Message> messageChannel = new LinkedTransferQueue<>();
 
     private State state;
 
     // volatile state
     private long commitIndex;
     private long lastApplied;
-    private Map<NodeIdentity, LogState> logState = new HashMap<NodeIdentity, LogState>();
+    private Map<NodeIdentity, LogState> logState = new HashMap<>();
 
     /**
      * Constructs a raft node.
@@ -67,32 +69,29 @@ public class Node {
      * @param stateManager The state manager to manage this nodes persistent state.
      * @param stateMachineApplier The state machine applier which governs how to change the state of committed logs.
      * @param nodes A collection of nodes representing all nodes in the cluster.
-     * @param rpc The rpc interface to other nodes into the cluster.
      * @param threadPool A thread pool to construct threads upon.
      * @param timeout The timeout setting of this node.
+     * @param internalRpc the internal rpc protocol
+     * @param clientRpc  the rpc protocol for communicating with the client
      */
     public Node(
-            NodeIdentity selfId, 
+            NodeIdentity selfId,
             StateManager stateManager, 
             StateMachineApplier stateMachineApplier,
-            Collection<NodeIdentity> nodes, 
-            Rpc rpc, 
+            Collection<NodeIdentity> nodes,
             ThreadPool threadPool, 
-            int timeout) {
+            int timeout,
+            Rpc internalRpc,
+            Rpc clientRpc) {
 
-        this.rpc = rpc;
+        this.internalRpc = internalRpc;
+        this.clientRpc = clientRpc;
         this.threadPool = threadPool;
         this.timeout = timeout;
         this.selfId = selfId;
         this.nodes = nodes;
         this.persisted = stateManager;
         this.stateMachineApplier = stateMachineApplier;
-    }
-
-    public void send(String command) throws InterruptedException {
-        logger.debug("send({})", command);
-
-        this.clientCommandChannel.put(command);
     }
 
     /**
@@ -104,56 +103,50 @@ public class Node {
         logger.trace("Starting node...");
 
         this.threadPool.onDaemonThread(this::stateMachineApplierThread);
-
-        this.threadPool.onDaemonThread(this::clientCommandApplierThread);
+        this.threadPool.onDaemonThread(this::clientRpcThread);
+        this.threadPool.onDaemonThread(this::internalRpcThread);
 
         this.changeState(FOLLOWER);
 
         while (true) {
-            Message m = this.rpc.next();
+            Message m = this.messageChannel.take();
+
+            logger.trace("incoming message to node: {}", m);
             
-            switch (m.getMessageType()) {
+            switch (m.getType()) {
                 case AppendEntities: {
                     logger.trace("Handling append entities message");
-                    onAppendEntities((AppendEntities) m);
+                    onAppendEntitiesMessage((AppendEntitiesMessage) m);
                     break;
                 }
                 case AppendEntitiesResult: {
                     logger.trace("Handling append entities result message");
-                    onAppendEntitiesResult((AppendEntitiesResult) m);
+                    onAppendEntitiesResultMessage((AppendEntitiesResultMessage) m);
                     break;
                 }
                 case RequestVote: {
                     logger.trace("Handing request vote message");
-                    onRequestVote((RequestVote) m);
+                    onRequestVoteMessage((RequestVoteMessage) m);
                     break;
                 }
                 case RequestVoteResult: {
                     logger.trace("Handing request vote result message");
-                    onRequestVoteResult((RequestVoteResult) m);
+                    onRequestVoteResultMessage((RequestVoteResultMessage) m);
+                    break;
+                }
+                case ClientCommand: {
+                    logger.trace("Handing client command message");
+                    onClientCommandMessage((ClientCommandMessage) m);
+                    break;
+                }
+                case ClientCommandResult: {
+                    logger.trace("Handling client command result message");
+                    onClientCommandResultMessage((ClientCommandResultMessage) m);
                     break;
                 }
                 default:
-                    logger.error("Invalid message type: {}", m.getMessageType());
+                    logger.error("Invalid message type: {}", m.getType());
             }
-        }
-    }
-
-    /**
-     * Sends a response to a node of the provided type indicating whether their message was successful.
-     */
-    private void respond(NodeIdentity to, MessageType type, boolean success) throws InterruptedException {
-        logger.trace("respond({}, {}, {})", to, type, success);
-
-        switch (type) {
-            case AppendEntitiesResult:
-                rpc.send(new Message.AppendEntitiesResult(this.selfId, to, this.persisted.getCurrentTerm(), success));
-                break;
-            case RequestVoteResult:
-                rpc.send(new Message.RequestVoteResult(this.selfId, to, this.persisted.getCurrentTerm(), success));
-                break;
-            default:
-                logger.error("Invalid type of response: {}", type);
         }
     }
 
@@ -237,44 +230,52 @@ public class Node {
     /**
      * When command is issued from a client.
      */
-    private synchronized void onClientCommand(String command) throws InterruptedException {
-        this.state.onClientCommand(command);
+    private synchronized void onClientCommandMessage(ClientCommandMessage m) throws InterruptedException {
+        this.state.onClientCommandMessage(m);
     }
 
     /**
      * When an append entities message is issued from another node.
      */
-    private synchronized void onAppendEntities(AppendEntities m) throws InterruptedException {
+    private synchronized void onAppendEntitiesMessage(AppendEntitiesMessage m) throws InterruptedException {
         this.checkTerm(m.getTerm());
 
-        this.state.onAppendEntities(m);
+        this.state.onAppendEntitiesMessage(m);
     }
 
     /**
      * When an append entities result message is issued from another node.
      */
-    private synchronized void onAppendEntitiesResult(AppendEntitiesResult m) throws InterruptedException {
+    private synchronized void onAppendEntitiesResultMessage(AppendEntitiesResultMessage m) throws InterruptedException {
         this.checkTerm(m.getTerm());
 
-        this.state.onAppendEntitiesResult(m);
+        this.state.onAppendEntitiesResultMessage(m);
     }
 
     /**
      * When a request vote message is issued from another node.
      */
-    private synchronized void onRequestVote(RequestVote m) throws InterruptedException {
+    private synchronized void onRequestVoteMessage(RequestVoteMessage m) throws InterruptedException {
         this.checkTerm(m.getTerm());
 
-        this.state.onRequestVote(m);
+        this.state.onRequestVoteMessage(m);
     }
 
     /**
      * When a request vote result message is issued from another node.
      */
-    private synchronized void onRequestVoteResult(RequestVoteResult m) throws InterruptedException {
+    private synchronized void onRequestVoteResultMessage(RequestVoteResultMessage m) throws InterruptedException {
         this.checkTerm(m.getTerm());
         
-        this.state.onRequestVoteResult(m);
+        this.state.onRequestVoteResultMessage(m);
+    }
+
+    /**
+     * When a client command result is issued to this node.
+     * This really shouldn't happen.
+     */
+    private synchronized void onClientCommandResultMessage(ClientCommandResultMessage m) throws InterruptedException {
+        this.state.onClientCommandResultMessage(m);
     }
 
     /**
@@ -301,14 +302,16 @@ public class Node {
 
                 logger.trace("sending append entities to {} with log entry {}", other, logEntry);
 
-                this.rpc.send(new AppendEntities(
-                    this.selfId, other, 
-                    this.persisted.getCurrentTerm(), 
-                    this.selfId, 
-                    otherState.nextIndex - 1, 
-                    logEntry == null || otherState.nextIndex == 1 ? 0 : this.persisted.getLogEntry(otherState.nextIndex - 1).getTerm(), 
-                    logEntry == null ? Collections.emptyList() : Collections.singletonList(logEntry.getEntity()), 
-                    this.commitIndex));   
+                this.internalRpc.send(
+                    other.getTransportLocation(),
+                    new BindableAppendEntitiesMessage(
+                        this.selfId, other,
+                        this.persisted.getCurrentTerm(),
+                        this.selfId,
+                        otherState.nextIndex - 1,
+                        logEntry == null || otherState.nextIndex == 1 ? 0 : this.persisted.getLogEntry(otherState.nextIndex - 1).getTerm(),
+                        logEntry == null ? Collections.emptyList() : Collections.singletonList(logEntry.getEntity()),
+                        this.commitIndex));
 
                 logger.trace("after send to {}", other);
             }
@@ -379,15 +382,26 @@ public class Node {
     }
 
     /**
-     * The client command applier thread.
+     * Rpc thread which reads from an rpc and aggregates to the message channel.
      */
-    private void clientCommandApplierThread() throws InterruptedException {
+    private void rpcThread(Rpc readFrom) throws InterruptedException {
         while (true) {
-            String command = this.clientCommandChannel.take();
-            logger.trace("got client command from channel");
-            this.onClientCommand(command);
-            logger.trace("applying client command");
+            this.messageChannel.put(readFrom.next());
         }
+    }
+
+    /**
+     * rpc thread which reads from the client rpc.
+     */
+    private void clientRpcThread() throws InterruptedException {
+        rpcThread(this.clientRpc);
+    }
+
+    /**
+     * rpc thread which reads from the internal rpc.
+     */
+    private void internalRpcThread() throws InterruptedException {
+        rpcThread(this.internalRpc);
     }
 
     /**
@@ -403,19 +417,21 @@ public class Node {
      */
     private static interface State {
 
-        void onClientCommand(String command) throws InterruptedException;
-
         void onEnterState() throws InterruptedException;
 
         void onExitState() throws InterruptedException;
 
-        void onAppendEntities(AppendEntities m) throws InterruptedException;
+        void onAppendEntitiesMessage(AppendEntitiesMessage m) throws InterruptedException;
 
-        void onAppendEntitiesResult(AppendEntitiesResult m) throws InterruptedException;
+        void onAppendEntitiesResultMessage(AppendEntitiesResultMessage m) throws InterruptedException;
 
-        void onRequestVote(RequestVote m) throws InterruptedException;
+        void onRequestVoteMessage(RequestVoteMessage m) throws InterruptedException;
 
-        void onRequestVoteResult(RequestVoteResult m) throws InterruptedException;
+        void onRequestVoteResultMessage(RequestVoteResultMessage m) throws InterruptedException;
+
+        void onClientCommandMessage(ClientCommandMessage m) throws InterruptedException;
+
+        void onClientCommandResultMessage(ClientCommandResultMessage m) throws InterruptedException;
 
     }
 
@@ -432,14 +448,14 @@ public class Node {
         }
 
         @Override
-        public void onAppendEntities(AppendEntities m) throws InterruptedException {
+        public void onAppendEntitiesMessage(AppendEntitiesMessage m) throws InterruptedException {
             Node.this.restartElectionThread();
 
             // handles the case when our term is greater than the message's term
 
             if (m.getTerm() < Node.this.persisted.getCurrentTerm()) {
                 Node.logger.trace("on append entities term < current term, responding false");
-                Node.this.respond(m.getFrom(), MessageType.AppendEntitiesResult, false);
+                m.reply(m.getFrom().getTransportLocation(), new AppendEntitiesResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
@@ -450,13 +466,13 @@ public class Node {
 
             if (logEntry == null && m.getPrevLogIndex() != 0) {
                 Node.logger.trace("on append entities log entry out of bounds, replying false");
-                Node.this.respond(m.getFrom(), MessageType.AppendEntitiesResult, false);
+                m.reply(m.getFrom().getTransportLocation(), new AppendEntitiesResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
             if (logEntry != null && logEntry.getTerm() != m.getPrevLogTerm()) {
                 Node.logger.trace("on append entities log entry prev log term does not match, dropping logs");
-                Node.this.respond(m.getFrom(), MessageType.AppendEntitiesResult, false);
+                m.reply(m.getFrom().getTransportLocation(), new AppendEntitiesResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
@@ -485,43 +501,48 @@ public class Node {
                 Node.this.commitIndex = Math.min(m.getLeaderCommit(), logIndex);
             }
 
-            Node.this.respond(m.getFrom(), MessageType.AppendEntitiesResult, true);
+            m.reply(m.getFrom().getTransportLocation(), new AppendEntitiesResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), true));
         }
 
         @Override
-        public void onAppendEntitiesResult(AppendEntitiesResult m) {
+        public void onAppendEntitiesResultMessage(AppendEntitiesResultMessage m) {
             Node.logger.trace("got append entities result as follower, ignoring");
         }
 
         @Override
-        public void onRequestVote(RequestVote m) throws InterruptedException {
+        public void onRequestVoteMessage(RequestVoteMessage m) throws InterruptedException {
             Node.logger.trace("got request vote from {} as follower", m.getFrom());
             
             if (Node.this.persisted.getVotedFor() != null) {
-                Node.this.respond(m.getFrom(), MessageType.RequestVoteResult, false);
+                Node.logger.trace("Not granting vote to {} because we've already voted this term", m);
+                m.reply(m.getFrom().getTransportLocation(), new RequestVoteResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
             if (m.getTerm() < Node.this.persisted.getCurrentTerm()) {
-                Node.this.respond(m.getFrom(), MessageType.RequestVoteResult, false);
+                Node.logger.trace("Not granting vote to {} because our term is higher", m);
+                m.reply(m.getFrom().getTransportLocation(), new RequestVoteResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
             if (m.getTerm() < Node.this.persisted.lastLogTerm()) {
-                Node.this.respond(m.getFrom(), MessageType.RequestVoteResult, false);
+                Node.logger.trace("Not granting vote to {} because our log is more complete (our term is greater)", m);
+                m.reply(m.getFrom().getTransportLocation(), new RequestVoteResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
             if (m.getLastLogIndex() < Node.this.persisted.lastLogIndex()) {
-                Node.this.respond(m.getFrom(), MessageType.RequestVoteResult, false);
+                Node.logger.trace("Not granting vote to {} because our log is more complete (our index is greater)", m);
+                m.reply(m.getFrom().getTransportLocation(), new RequestVoteResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), false));
                 return;
             }
 
-            Node.this.respond(m.getFrom(), MessageType.RequestVoteResult, true);
+            Node.logger.trace("Granting vote to {}", m);
+            m.reply(m.getFrom().getTransportLocation(), new RequestVoteResultMessage(Node.this.selfId, m.getFrom(), Node.this.persisted.getCurrentTerm(), true));
         }
 
         @Override
-        public void onRequestVoteResult(RequestVoteResult m) {
+        public void onRequestVoteResultMessage(RequestVoteResultMessage m) {
             Node.logger.trace("got request vote result as follower, ignoring");
         }
 
@@ -531,8 +552,16 @@ public class Node {
         }
 
         @Override
-        public void onClientCommand(String command) throws InterruptedException {
+        public void onClientCommandMessage(ClientCommandMessage m) throws InterruptedException {
             logger.trace("ignoring client command as follower");
+            // TODO forward this to the proper node
+        }
+
+        @Override
+        public void onClientCommandResultMessage(ClientCommandResultMessage m) throws InterruptedException {
+            logger.trace("ignoring client command result as follower");
+            // TODO Auto-generated method stub
+
         }
     }
 
@@ -561,22 +590,22 @@ public class Node {
         }
 
         @Override
-        public void onAppendEntities(AppendEntities m) {
+        public void onAppendEntitiesMessage(AppendEntitiesMessage m) {
             Node.logger.trace("got append entities as leader, ignoring");
         }
 
         @Override
-        public void onAppendEntitiesResult(AppendEntitiesResult m) {
-            Node.logger.trace("got append entities result as leader");
+        public void onAppendEntitiesResultMessage(AppendEntitiesResultMessage m) {
+            Node.logger.trace("got append entities result as leader: {}", m);
             
-            int delta = m.getSuccess() ? 1 : -1;
+            int delta = m.isSuccess() ? 1 : -1;
 
             LogState logState = Node.this.logState.get(m.getFrom());
             logState.nextIndex = Math.max(0, logState.nextIndex + delta);
 
             Node.logger.trace("advanced nextIndex to {} for {}", logState.nextIndex, m.getFrom());
 
-            if (m.getSuccess()) {
+            if (m.isSuccess()) {
                 logState.matchIndex = Long.min(logState.matchIndex + 1, Node.this.persisted.lastLogIndex());
                 Node.logger.trace("match index for node {} updated to {}", m.getFrom(), logState.matchIndex);
             }
@@ -585,12 +614,12 @@ public class Node {
         }
 
         @Override
-        public void onRequestVote(RequestVote m) {
+        public void onRequestVoteMessage(RequestVoteMessage m) {
             Node.logger.trace("got request vote as leader, ignoring");
         }
 
         @Override
-        public void onRequestVoteResult(RequestVoteResult m) {
+        public void onRequestVoteResultMessage(RequestVoteResultMessage m) {
             Node.logger.trace("got request vote result as leader, ignoring");
         }
 
@@ -632,13 +661,22 @@ public class Node {
         }
 
         @Override
-        public void onClientCommand(String command) throws InterruptedException {
+        public void onClientCommandMessage(ClientCommandMessage m) throws InterruptedException {
+
             logger.trace("adhering to client command as leader");
 
             Node.this.persisted.appendEntity(
                 Node.this.persisted.lastLogIndex() + 1, 
                 Node.this.persisted.getCurrentTerm(), 
-                command);
+                m.getData());
+
+            // TODO respond once the message is applied
+           m.reply(m.getFrom().getTransportLocation(), new ClientCommandResultMessage(Node.this.selfId, m.getFrom(), "ok", true));
+        }
+
+        @Override
+        public void onClientCommandResultMessage(ClientCommandResultMessage m) throws InterruptedException {
+            Node.logger.trace("got client command result as leader ignoring");
         }
     }
 
@@ -661,8 +699,11 @@ public class Node {
             for (NodeIdentity other : Node.this.nodes) {
                 if (other.equals(Node.this.selfId)) continue;
 
-                Node.this.rpc.send(
-                    new Message.RequestVote(
+                logger.trace("Sending vote request to {} from {}", Node.this.selfId, other);
+
+                Node.this.internalRpc.send(
+                    other.getTransportLocation(),
+                    new BindableRequestVoteMessage(
                         Node.this.selfId, 
                         other, 
                         Node.this.persisted.getCurrentTerm(), 
@@ -680,25 +721,25 @@ public class Node {
         }
 
         @Override
-        public void onAppendEntities(AppendEntities m) throws InterruptedException {
+        public void onAppendEntitiesMessage(AppendEntitiesMessage m) throws InterruptedException {
             Node.logger.trace("got append entities as candidate, converting to follower");
             Node.this.changeState(FOLLOWER);
         }
 
         @Override
-        public void onAppendEntitiesResult(AppendEntitiesResult m) {
+        public void onAppendEntitiesResultMessage(AppendEntitiesResultMessage m) {
             Node.logger.trace("got append entities result as candidate, ignoring");
         }
 
         @Override
-        public void onRequestVote(RequestVote m) {
+        public void onRequestVoteMessage(RequestVoteMessage m) {
             Node.logger.trace("got request vote as candidate, ignoring");
         }
 
         @Override
-        public void onRequestVoteResult(RequestVoteResult m) throws InterruptedException {
+        public void onRequestVoteResultMessage(RequestVoteResultMessage m) throws InterruptedException {
 
-            if (!m.getSuccess()) {
+            if (!m.isSuccess()) {
                 Node.logger.trace("request vote from {} was not successful", m.getFrom());
             }
 
@@ -707,7 +748,7 @@ public class Node {
                 return;
             }
 
-            Node.logger.debug("request vote from {} was successful", m.getFrom());
+            Node.logger.trace("request vote from {} was successful", m.getFrom());
 
             this.voted.add(m.getFrom());
 
@@ -727,8 +768,13 @@ public class Node {
         }
 
         @Override
-        public void onClientCommand(String command) throws InterruptedException {
+        public void onClientCommandMessage(ClientCommandMessage m) throws InterruptedException {
             logger.trace("ignoring client command as candidate");
+        }
+
+        @Override
+        public void onClientCommandResultMessage(ClientCommandResultMessage m) throws InterruptedException {
+            logger.trace("ignoring client command result as candidate");
         }
     }
 

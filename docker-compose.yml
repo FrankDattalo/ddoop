@@ -1,0 +1,30 @@
+version: "3.4"
+
+x-environment-config: &environment_config
+  TIMEOUT: 250
+  NODES: node1:8000/node1:9000,node2:8000/node2:9000,node3:8000/node3:9000
+
+services:
+  node1:
+    image: ddoop
+    environment:
+      <<: *environment_config
+      SELF_ID: node1:8000/node1:9000
+    ports:
+      - 9000:9000
+
+  node2:
+    image: ddoop
+    environment:
+      <<: *environment_config
+      SELF_ID: node2:8000/node2:9000
+    ports:
+      - 9001:9000
+
+  node3:
+    image: ddoop
+    environment:
+      <<: *environment_config
+      SELF_ID: node3:8000/node3:9000
+    ports:
+      - 9002:9000

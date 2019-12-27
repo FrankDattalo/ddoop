@@ -79,7 +79,7 @@
           </execution>
         </executions>
       </plugin>
-      <!-- <plugin>
+      <plugin>
         <groupId>com.google.cloud.tools</groupId>
         <artifactId>jib-maven-plugin</artifactId>
         <version>1.8.0</version>
@@ -92,11 +92,11 @@
           <execution>
             <phase>package</phase>
             <goals>
-              <goal>build</goal>
+              <goal>dockerBuild</goal>
             </goals>
           </execution>
       </executions>
-      </plugin> -->
+      </plugin>
     </plugins>
 
     <pluginManagement><!-- lock down plugins versions to avoid using Maven defaults (may be moved to parent pom) -->
