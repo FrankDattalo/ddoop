@@ -72,7 +72,7 @@ public class State implements AutoCloseable {
     PathNode current = traverseTo(path, false);
 
     if (current == null) {
-      logger.trace("destination does not exist");
+      logger.warn("destination does not exist");
       return Collections.emptyList();
     }
 
@@ -106,43 +106,13 @@ public class State implements AutoCloseable {
     PathNode current = traverseTo(path, false);
 
     if (current == null) {
-      logger.trace("path does not exist");
+      logger.warn("path does not exist");
       return;
     }
 
     logger.trace("recursively deleting path");
 
-    recursiveDelete(current);
-
-    propogateDeletes(current);
-  }
-
-  private void propogateDeletes(PathNode deleted) {
-
-    PathNode parent = deleted.getParent();
-
-    parent.getChildrenList().remove(deleted.absolutePath);
-
-    logger.trace("parent of {} is {}", deleted, parent);
-
-    if (parent != null && !parent.getChildren().iterator().hasNext()) {
-
-      logger.trace("deleting parent");
-      parent.delete();
-
-      propogateDeletes(parent);
-    }
-  }
-
-  private void recursiveDelete(PathNode pathNode) {
-
-    logger.trace("deleting: {}", pathNode);
-
-    for (PathNode child : pathNode.getChildren()) {
-      recursiveDelete(child);
-    }
-
-    pathNode.delete();
+    current.delete();
   }
 
   public synchronized boolean isDirectory(String path) {
@@ -161,8 +131,8 @@ public class State implements AutoCloseable {
 
     PathNode node = traverseTo(path, true);
 
-    if (node.getChildren().iterator().hasNext()) {
-      logger.trace("cannot put, this node is a directory");
+    if (node == null || node.getChildren().iterator().hasNext()) {
+      logger.error("cannot put, this node is a directory");
       return;
     }
 
@@ -296,13 +266,39 @@ public class State implements AutoCloseable {
     }
 
     private void delete() {
-      State.this.pathValues.remove(this.absolutePath);
+      deleteChildren(this);
 
-      List<String> children = getChildrenList();
-
-      children.clear();
+      deleteEmptyParents(this);
 
       State.this.db.commit();
+    }
+
+    private void deleteChildren(PathNode node) {
+
+      State.this.pathValues.remove(node.absolutePath);
+
+      for (PathNode child : node.getChildren()) {
+        deleteChildren(child);
+      }
+
+      node.getChildrenList().clear();
+    }
+
+    private void deleteEmptyParents(PathNode node) {
+      PathNode parent = node.getParent();
+
+      if (parent == null) {
+        return;
+      }
+
+      List<String> parentsChildren = parent.getChildrenList();
+
+      parentsChildren.remove(node.absolutePath);
+
+      if (parentsChildren.isEmpty()) {
+        State.this.pathValues.remove(parent.absolutePath);
+        deleteEmptyParents(node.getParent());
+      }
     }
 
     private List<String> getChildrenList() {
