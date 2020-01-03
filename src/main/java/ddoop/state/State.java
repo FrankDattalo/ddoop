@@ -1,49 +1,44 @@
 package ddoop.state;
 
+import ddoop.raft.state.StateMachineApplier;
+import ddoop.util.MapDbUtils;
 import org.mapdb.DB;
-import org.mapdb.DBMaker;
 import org.mapdb.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-public class State implements AutoCloseable {
+public class State implements AutoCloseable, StateMachineApplier {
 
   private final Logger logger = LoggerFactory.getLogger(State.class);
 
-  private static final String PATH_REGEX = "/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+";
+  private static final String PATH_REGEX = "(?<path>/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+)";
+  private static final String COMMAND_REGEX = "(?<command>(put|delete)) " + PATH_REGEX + "( (?<value>.*))?";
 
-  private final String dbPath;
+  private final DB db;
 
-  private DB db;
-
-  private PathNode root;
+  private final PathNode root = new PathNode("/");
 
   private Map<String, String> pathValues;
 
-  public State(String dbPath) {
-    this.dbPath = dbPath;
+  public State(DB db) {
+    this.db = Objects.requireNonNull(db, "db cannot be null");
   }
 
   public synchronized void init() {
 
     logger.trace("init()");
 
-    this.db = DBMaker.fileDB(this.dbPath)
-        .fileMmapEnableIfSupported()
-        .closeOnJvmShutdown()
-        .transactionEnable()
-        .executorEnable()
-        .make();
-
-    this.pathValues = this.db.hashMap("pathValues", Serializer.STRING, Serializer.STRING).createOrOpen();
+    this.pathValues = this.db.hashMap(
+        MapDbUtils.nameForElement(this.getClass(), "pathValues"),
+        Serializer.STRING, Serializer.STRING)
+        .createOrOpen();
 
     this.db.commit();
-
-    this.root = new PathNode("/");
 
     logger.trace("init() done");
   }
@@ -216,6 +211,43 @@ public class State implements AutoCloseable {
     }
   }
 
+  @Override
+  public void apply(String command) {
+    Pattern pattern = Pattern.compile(COMMAND_REGEX, Pattern.DOTALL);
+
+    Matcher matcher = pattern.matcher(command);
+
+    if (!matcher.matches()) {
+      logger.trace("input did not match regex: {}", command);
+      return;
+    }
+
+    String method = matcher.group("command");
+    String path = matcher.group("path");
+
+    switch (method) {
+      case "put": {
+        String value = matcher.group("value");
+
+        if (value == null) {
+          logger.error("Invalid format for put: {}", command);
+          return;
+        }
+
+        this.put(path, value);
+
+        break;
+      }
+      case "delete": {
+        this.delete(path);
+        break;
+      }
+      default: {
+        logger.error("Illegal method: " + method);
+      }
+    }
+  }
+
   public static final class Path {
     private final String name;
     private final boolean isDirectory;
@@ -302,7 +334,9 @@ public class State implements AutoCloseable {
     }
 
     private List<String> getChildrenList() {
-      List<String> ret = State.this.db.indexTreeList(this.absolutePath, Serializer.STRING).createOrOpen();
+      List<String> ret = State.this.db.indexTreeList(
+          MapDbUtils.nameForElement(this.getClass(), this.absolutePath),
+          Serializer.STRING).createOrOpen();
 
       State.this.db.commit();
 
